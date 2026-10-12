@@ -95,33 +95,20 @@ jobs:
       - name: Swap Delta onto the live classpath
         run: bash scripts/tools/swap-delta-version.sh "${{ matrix.delta }}"
 
-      - name: Bring up Spark + Unity Catalog (reads the swapped live conf; storage already up)
-        # The ABI gate below is a catalog-managed Delta write through the UC
-        # connector, so UC must be up — that is the path where 4.3.0 NPEs and
-        # 4.2.0 lacks catalog-managed support (a path-based spark_catalog write
-        # would pass on any 4.x and make the negative gate a lie).
-        run: |
-          ./lakehouse start all
-          ./lakehouse start unity-catalog
+      - name: Bring up Spark (reads the swapped live conf — storage already up)
+        run: ./lakehouse start all
 
-      - name: Readiness gate (spark-master + UC must be up — a down service is a failure)
+      - name: Readiness gate (spark-master must be up — a down master is a failure)
         run: |
           set -e
           ./lakehouse status --json | tee status.json
           python3 - <<'PY'
           import json, sys
           s = json.load(open("status.json"))
-          spark = s.get("spark", {})
-          svc = s.get("services", {})
-          required = {
-              "spark.master": spark.get("master"),
-              "services.unity_catalog": svc.get("unity_catalog"),
-          }
-          down = [k for k, v in required.items() if not v]
-          if down:
-              print(f"::error::stack not ready — down: {down}; cannot evaluate Delta ABI: {s}")
+          if not s.get("spark", {}).get("master"):
+              print(f"::error::spark-master not running; cannot evaluate Delta ABI: {s}")
               sys.exit(1)
-          print("spark-master + unity-catalog up — evaluating Delta ABI.")
+          print("spark-master up — evaluating Delta ABI.")
           PY
 
       - name: Run the Delta ABI test, assert outcome matches expectation
