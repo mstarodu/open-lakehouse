@@ -48,6 +48,8 @@ services:
       # Optional — only consulted when the matching optional service is running
       # or when code-execution is enabled. Empty by default.
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:-}
+      # Local-only, same-origin browser session handoff; no token in links.
+      DASHBOARD_ALLOW_JUPYTER_LAUNCH: ${DASHBOARD_ALLOW_JUPYTER_LAUNCH:-false}
       DELTA_SHARING_TOKEN: ${DELTA_SHARING_TOKEN:-}
       PIPELINES_DIR: ${PIPELINES_DIR:-/app/pipelines}
       # Accept the Delta Sharing server's self-signed cert (dev only). The store

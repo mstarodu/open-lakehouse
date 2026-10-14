@@ -162,3 +162,25 @@ def test_notebook_route_defaults_match_server_port():
     ):
         source = _read(DASHBOARD / rel)
         assert 'process.env.JUPYTER_URL || "http://jupyter:8889"' in source, rel
+
+
+def test_browser_launch_is_opt_in_and_uses_no_client_token():
+    assert (
+        "DASHBOARD_ALLOW_JUPYTER_LAUNCH: ${DASHBOARD_ALLOW_JUPYTER_LAUNCH:-false}"
+        in _read(COMPOSE)
+    )
+    component = _read(DASHBOARD / "src/components/jupyter-launch-button.tsx")
+    assert 'action="/api/jupyter-launch"' in component
+    assert 'method="post"' in component
+    assert "JUPYTER_TOKEN" not in component
+
+
+def test_all_browser_entry_points_use_the_launch_action():
+    for rel in (
+        "src/app/page.tsx",
+        "src/app/notebooks/page.tsx",
+        "src/components/onboarding.tsx",
+    ):
+        text = _read(DASHBOARD / rel)
+        assert "JupyterLaunchButton" in text
+        assert "http://localhost:8889" not in text
