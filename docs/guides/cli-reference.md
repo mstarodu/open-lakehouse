@@ -50,7 +50,8 @@ Runs the following steps and reports each:
 Start one of the services or all of them.
 
 ```bash
-./lakehouse start all              # Spark 4.1 master + worker + Connect + Kafka
+./lakehouse start all              # complete stack, storage first and dashboard last
+./lakehouse start core             # storage + Spark master/worker/Connect + Kafka/Zookeeper
 ./lakehouse start unity-catalog
 ./lakehouse start mlflow
 ./lakehouse start airflow
@@ -58,24 +59,34 @@ Start one of the services or all of them.
 ./lakehouse start kafka            # Kafka only
 ```
 
-`all` includes the Spark Connect server but does NOT include Unity Catalog, MLflow, or Airflow — start those individually.
+`all` (also the default for bare `start`) starts storage, Spark, Kafka, Unity Catalog,
+MLflow, Airflow, notebooks, Delta Sharing and dashboard, in that order. `core`
+starts storage, Spark and Kafka only. Individual service commands remain available,
+including `start sharing` as an alias for `share start`. A failed build, startup or
+readiness check stops the group and returns a failure; earlier services remain
+running so the failure can be inspected and the command retried. Dashboard code
+execution stays disabled unless explicitly configured.
 
 ### `stop [service]`
 
-Stop a service (preserves named volumes — data is safe).
+Stop a service or group (preserves named volumes — data is safe). `all` and `core`
+stop the same members they start, in reverse order with storage last. If a stop
+fails, dependencies stay running. `stop core` includes storage; it does not stop
+services outside the core group.
 
 ```bash
 ./lakehouse stop all
-./lakehouse stop unity-catalog
-./lakehouse stop mlflow
+./lakehouse stop core
 ./lakehouse stop airflow
 ```
 
-For destructive teardown, use `docker compose -f <file> down -v` manually after confirming you accept data loss.
+Use `./lakehouse reset --all --dry-run` to review a destructive reset; ordinary stop
+and restart never delete named volumes.
 
 ### `restart [service]`
 
-Equivalent to `stop` + 2s sleep + `start`. Use for config changes that need a fresh container.
+Equivalent to `stop` + 2s sleep + `start`, using the same service or group on both
+sides. Use for config changes that need a fresh container.
 
 ### `status [--json]`
 
@@ -209,13 +220,9 @@ cat demos/streaming-kafka-to-iceberg/README.md      # follow Run section
 
 # Daily stop
 ./lakehouse stop all
-./lakehouse stop unity-catalog
 
-# Full reset (destructive)
-./lakehouse stop all
-docker compose -f docker-compose-unity-catalog.yml down -v
-docker compose -f docker-compose-mlflow.yml down -v
-docker compose -f docker-compose-airflow.yml down -v
+# Preview a full reset before confirming it
+./lakehouse reset --all --dry-run
 ```
 
 ## For AI agents

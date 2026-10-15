@@ -323,15 +323,15 @@ wait_for_services() {
 
     # Kafka/Zookeeper (if started)
     if docker ps --format '{{.Names}}' | grep -q "^${zk_ct}$"; then
-        wait_for_service "Zookeeper" "nc -z localhost 2181" 30
+        wait_for_service "Zookeeper" "nc -z localhost 2181" 30 || return 1
     fi
     if docker ps --format '{{.Names}}' | grep -q "^${kafka_ct}$"; then
-        wait_for_service "Kafka" "nc -z localhost 9092" 30
+        wait_for_service "Kafka" "nc -z localhost 9092" 30 || return 1
     fi
 
     # Spark (if started)
     if docker ps --format '{{.Names}}' | grep -q "^${master_container}$"; then
-        wait_for_service "Spark Master" "nc -z localhost $spark_port" 30
+        wait_for_service "Spark Master" "nc -z localhost $spark_port" 30 || return 1
         # Spark UI (8082) is a diagnostic web surface, not a data-plane dependency:
         # Connect workloads reach Spark over gRPC (15002) + the master port, never
         # the UI. On constrained hosts (cold CI runners) the UI can lag well past
@@ -585,9 +585,9 @@ cmd_status_human() {
     echo -e "\n${YELLOW}MLflow:${NC}"
     check_container "$mlflow_ct" && check_service mlflow 5000 "MLflow Tracking" || true
 
-    echo -e "\n${YELLOW}Delta Sharing (opt-in):${NC}"
+    echo -e "\n${YELLOW}Delta Sharing:${NC}"
     check_container "$(resolve_container_name delta-sharing)" || true
-    echo -e "\n${YELLOW}Dashboard (optional, opt-in — not started by 'start all'):${NC}"
+    echo -e "\n${YELLOW}Dashboard (included in 'start all', skipped by 'start core'):${NC}"
     check_container "$(resolve_container_name dashboard)" && check_service dashboard 3000 "Dashboard UI" || true
 
     echo -e "\n${YELLOW}Ports:${NC}"
@@ -601,7 +601,7 @@ cmd_status_human() {
     echo "  Zookeeper:        2181"
     echo "  Airflow:          8085 (UI)"
     echo "  MLflow:           5000 (Tracking), 5001 (AI Gateway)"
-    echo "  Delta Sharing:    8443 (HTTPS, opt-in via 'share')"
+    echo "  Delta Sharing:    8443 (HTTPS)"
     echo "  Dashboard:        3000 (optional, read-only viewer)"
 
     echo -e "\n${YELLOW}Configurations:${NC}"
@@ -762,11 +762,32 @@ check_ports_for_service() {
     return 0
 }
 
+# Start in dependency order; stop/restart use the same groups in reverse.
+lifecycle_group_services() {
+    case "$1" in
+        core) echo "storage spark kafka" ;;
+        all) echo "storage spark kafka unity-catalog mlflow airflow notebooks sharing dashboard" ;;
+        *) return 1 ;;
+    esac
+}
+
 # Start command
 cmd_start() {
-    header "STARTING SERVICES"
-
     local service=$1
+    case "$service" in
+        core|all)
+            local components=() component
+            read -r -a components <<< "$(lifecycle_group_services "$service")"
+            for component in "${components[@]}"; do
+                if ! cmd_start "$component"; then
+                    echo "Failed to start $component; remaining services were not started." >&2
+                    return 1
+                fi
+            done
+            return 0
+            ;;
+    esac
+    header "STARTING SERVICES"
     local spark_port=$(get_spark_port)
 
     # A missing .env makes Compose interpolate blank credentials (POSTGRES_USER,
@@ -788,18 +809,15 @@ cmd_start() {
     echo ""
 
     case $service in
-        storage|all)
-            # `all` starts storage FIRST (this arm runs before the spark/kafka
-            # arms below). Since PR #13 moved PostgreSQL/SeaweedFS into Compose,
-            # `start all` must bring them up — otherwise Spark/UC/Delta come up
-            # pointing at an absent metastore/object store.
+        storage)
+            # Both groups dispatch storage first, before database/S3 clients.
             echo -e "${YELLOW}Starting storage (SeaweedFS + PostgreSQL)...${NC}"
             overlay_set_compose_args storage || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
             # pg_isready (not just `nc -z`) so the bootstrap below only runs once
             # PostgreSQL truly accepts connections.
             wait_for_postgres_ready 60 || return 1
-            wait_for_service "SeaweedFS S3" "nc -z localhost 8333" 60
+            wait_for_service "SeaweedFS S3" "nc -z localhost 8333" 60 || return 1
             echo -e "${YELLOW}Bootstrapping buckets / prefixes / databases...${NC}"
             # Fail the start if bootstrap fails: init-storage.sh now needs no host
             # aws/psql (dockerized fallbacks + `docker exec` for psql), so a failure
@@ -816,20 +834,20 @@ cmd_start() {
     esac
 
     case $service in
-        spark|all)
+        spark)
             echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(get_spark_connect_port))...${NC}"
             overlay_set_compose_args spark41 || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "Spark Connect" "nc -z localhost $(get_spark_connect_port)" 90
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
+            wait_for_service "Spark Connect" "nc -z localhost $(get_spark_connect_port)" 90 || return 1
             echo -e "${GREEN}Spark Connect endpoint:${NC} $(get_spark_remote)"
             ;;
     esac
 
     case $service in
-        kafka|all)
+        kafka)
             echo -e "${YELLOW}Starting Kafka...${NC}"
             overlay_set_compose_args kafka || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
             ;;
     esac
 
@@ -842,8 +860,8 @@ cmd_start() {
                 echo -e "${YELLOW}!${NC} Edit config/unity-catalog/server.properties with your S3 credentials"
             fi
             overlay_set_compose_args unity-catalog || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "Unity Catalog" "curl -s http://localhost:8081/api/2.1/unity-catalog/catalogs" 60
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
+            wait_for_service "Unity Catalog" "curl -s http://localhost:8081/api/2.1/unity-catalog/catalogs" 60 || return 1
             ;;
     esac
 
@@ -856,8 +874,8 @@ cmd_start() {
             wait_for_postgres_ready 60 || return 1
             mkdir -p logs/airflow
             overlay_set_compose_args airflow || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
-            wait_for_service "Airflow" "curl -s http://localhost:8085/health" 120
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build || return 1
+            wait_for_service "Airflow" "curl -s http://localhost:8085/health" 120 || return 1
             echo -e "${GREEN}Airflow UI available at: http://localhost:8085${NC}"
             echo -e "${YELLOW}Default credentials: admin/admin (change in .env)${NC}"
             ;;
@@ -870,35 +888,34 @@ cmd_start() {
             # PostgreSQL, so gate on Postgres health (else it crash-loops).
             wait_for_postgres_ready 60 || return 1
             overlay_set_compose_args mlflow || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "MLflow" "curl -s http://localhost:5000/health" 60
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
+            wait_for_service "MLflow" "curl -s http://localhost:5000/health" 60 || return 1
             echo -e "${GREEN}MLflow tracking UI at: http://localhost:5000${NC}"
             ;;
     esac
 
     case $service in
         notebooks)
-            # Opt-in only (deliberately NOT part of `start all`), mirroring `stop
-            # notebooks`. Needed so a Jupyter stopped via the CLI (or quiesced by
-            # `reset`) can be brought back — reset_restore_services calls `cmd_start`.
+            # Also startable individually and during reset service restoration.
             echo -e "${YELLOW}Starting notebooks (Jupyter)...${NC}"
             overlay_set_compose_args notebooks || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
+            wait_for_service "Jupyter" "docker exec $(resolve_container_name jupyter) curl -fsS --max-time 5 http://127.0.0.1:8889/api" 90 || return 1
             ;;
     esac
 
     case $service in
         dashboard)
-            # Opt-in only (deliberately NOT part of `start all` — D8 neutrality: a
-            # Databricks-flavored optional service must not start with the core
-            # stack). First run builds the Next.js image; if public npm is
+            # Included in all, excluded from core. First run builds the Next.js
+            # image; if public npm is
             # unreachable, pass NPM_REGISTRY / NPM_STRICT_SSL as build args, e.g.
             #   NPM_REGISTRY=<proxy> NPM_STRICT_SSL=false ./lakehouse start dashboard
             echo -e "${YELLOW}Starting dashboard (read-only viewer)...${NC}"
             check_ports_for_service dashboard || return 1
             overlay_set_compose_args dashboard || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            echo -e "${GREEN}Dashboard at: http://localhost:3000${NC} (first build can take a few minutes)"
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d || return 1
+            wait_for_service "Dashboard" "docker exec $(resolve_container_name dashboard) wget -qO- http://127.0.0.1:3000" 90 || return 1
+            echo -e "${GREEN}Dashboard at: http://localhost:3000${NC}"
             if [ "${DASHBOARD_ALLOW_CODE_EXECUTION:-false}" = "true" ]; then
                 echo -e "${RED}WARNING: code-execution ENABLED (Pipelines/Notebooks pages, /api/jupyter-exec, /api/pipelines/run). Do NOT expose this dashboard to an untrusted network.${NC}"
             fi
@@ -906,48 +923,66 @@ cmd_start() {
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks|dashboard)
+        sharing)
+            cmd_share start || return 1
+            ;;
+    esac
+
+    case $service in
+        storage|spark|kafka|all|core|unity-catalog|uc|airflow|mlflow|notebooks|sharing|dashboard)
             ;;
         *)
-            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all]"
+            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|sharing|dashboard|core|all]"
             exit 1
             ;;
     esac
 
-    if [ "$service" = "all" ] || [ "$service" = "spark" ] || [ "$service" = "kafka" ]; then
+    if [ "$service" = "spark" ] || [ "$service" = "kafka" ]; then
         echo -e "\n${YELLOW}Waiting for services to be ready...${NC}"
-        wait_for_services
+        wait_for_services || return 1
         echo ""
     fi
 }
 
 # Stop command
 cmd_stop() {
-    header "STOPPING SERVICES"
-
     local service=$1
+    case "$service" in
+        core|all)
+            local components=() index
+            read -r -a components <<< "$(lifecycle_group_services "$service")"
+            for ((index=${#components[@]}-1; index>=0; index--)); do
+                if ! cmd_stop "${components[index]}"; then
+                    echo "Failed to stop ${components[index]}; dependencies were left running." >&2
+                    return 1
+                fi
+            done
+            return 0
+            ;;
+    esac
+    header "STOPPING SERVICES"
 
     case $service in
         storage)
             echo -e "${YELLOW}Stopping storage (SeaweedFS + PostgreSQL)...${NC}"
             overlay_set_compose_args storage || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
     case $service in
-        spark|all)
+        spark)
             echo -e "${YELLOW}Stopping Spark 4.1...${NC}"
             overlay_set_compose_args spark41 || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
     case $service in
-        kafka|all)
+        kafka)
             echo -e "${YELLOW}Stopping Kafka...${NC}"
             overlay_set_compose_args kafka || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
@@ -955,7 +990,7 @@ cmd_stop() {
         unity-catalog|uc)
             echo -e "${YELLOW}Stopping Unity Catalog...${NC}"
             overlay_set_compose_args unity-catalog || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
@@ -963,7 +998,7 @@ cmd_stop() {
         airflow)
             echo -e "${YELLOW}Stopping Airflow...${NC}"
             overlay_set_compose_args airflow || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
@@ -971,7 +1006,7 @@ cmd_stop() {
         mlflow)
             echo -e "${YELLOW}Stopping MLflow...${NC}"
             overlay_set_compose_args mlflow || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
@@ -979,33 +1014,30 @@ cmd_stop() {
         notebooks)
             echo -e "${YELLOW}Stopping notebooks (Jupyter)...${NC}"
             overlay_set_compose_args notebooks || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
     case $service in
         sharing)
-            # Internal arm for reset quiescence (reset_stop_services -> cmd_stop sharing).
-            # Delta Sharing's primary interface is `./lakehouse share`; this is
-            # deliberately NOT in `stop all` nor the usage list. Return early so it
-            # never reaches the shared valid-set below (keeping stop-all + usage as-is).
+            # Shared by stop all, individual stop and reset quiescence.
             echo -e "${YELLOW}Stopping Delta Sharing...${NC}"
             overlay_set_compose_args sharing || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             return 0
             ;;
         dashboard)
             echo -e "${YELLOW}Stopping dashboard...${NC}"
             overlay_set_compose_args dashboard || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down || return 1
             ;;
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks|dashboard)
+        storage|spark|kafka|all|core|unity-catalog|uc|airflow|mlflow|notebooks|dashboard)
             ;;
         *)
-            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all]"
+            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|sharing|dashboard|core|all]"
             exit 1
             ;;
     esac
@@ -3166,11 +3198,11 @@ cmd_share() {
             echo -e "  ${YELLOW}Reminder:${NC} the shared tables must be seeded once — './lakehouse share seed'."
             overlay_set_compose_args sharing || return 1
             echo -e "${YELLOW}Starting Delta Sharing (building the image if needed)...${NC}"
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build || return 1
             # `curl -sk`: -s satisfies wait_for_service's command allowlist; -k is
             # required for the server's self-signed cert.
-            wait_for_service "Delta Sharing" "curl -sk https://localhost:${DELTA_SHARING_PORT:-8443}/delta-sharing/" 120
-            share_write_profile "$token"
+            wait_for_service "Delta Sharing" "curl -sk https://localhost:${DELTA_SHARING_PORT:-8443}/delta-sharing/" 120 || return 1
+            share_write_profile "$token" || return 1
             echo -e "${GREEN}Delta Sharing serving at: $(share_endpoint)${NC}"
             ;;
         stop)
@@ -3220,8 +3252,8 @@ Commands:
   preflight           Run preflight checks before starting services
   migrate [--dry-run] Run database schema migrations
   status [--json]     Show all service status (human or JSON)
-  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all)
-  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all)
+  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|sharing|dashboard|core|all)
+  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|sharing|dashboard|core|all)
   restart [service]   Restart service
   logs [service]      Tail logs (postgres|seaweedfs|spark-master|spark-worker|kafka|
                                   zookeeper|unity-catalog|mlflow|airflow-*|dashboard)
@@ -3246,8 +3278,11 @@ Services:
   airflow        Apache Airflow 3.1 (UI 8085)
   unity-catalog  Unity Catalog OSS 0.5.0 (REST API 8081)
   mlflow         MLflow 3.14 (tracking 5000, AI gateway 5001)
-  delta-sharing  Delta Sharing server + re-signing proxy (HTTPS 8443) — via `share`, opt-in
-  all            Spark + Kafka (start storage, unity-catalog, airflow, mlflow individually)
+  sharing        Delta Sharing server + re-signing proxy (HTTPS 8443); also via `share`
+  notebooks      JupyterLab (8889)
+  dashboard      Local dashboard (3000)
+  core           Storage + Spark master/worker/Connect + Kafka/Zookeeper
+  all            Core + Unity Catalog + MLflow + Airflow + notebooks + sharing + dashboard
 
 Catalog: Unity Catalog OSS only. No JDBC-catalog mode. UC provides:
   - Iceberg + Delta + Hudi via UniForm
@@ -3265,8 +3300,7 @@ Test Data:
 Examples:
   lakehouse setup
   lakehouse start all
-  lakehouse start unity-catalog
-  lakehouse start mlflow
+  lakehouse start core
   lakehouse status --json
   lakehouse testdata generate --days 30
   lakehouse browsedata iceberg.gold.hourly_metrics

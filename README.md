@@ -63,11 +63,13 @@ cd open-lakehouse
 
 cp .env.example .env       # fill in POSTGRES_*, S3_* placeholders
 ./lakehouse setup          # validate env, install deps, download ~860MB of JARs
-./lakehouse start all      # Spark 4.1 master + worker + Connect server + Kafka
-./lakehouse start unity-catalog
-./lakehouse start mlflow
+./lakehouse start all      # complete stack, including dashboard and notebooks
 ./lakehouse status --json  # confirm healthy (incl. spark.connect_grpc_listening)
 ```
+
+`start all` starts storage, Spark, Kafka, Unity Catalog, MLflow, Airflow, Jupyter,
+Delta Sharing and the dashboard. Use `./lakehouse start core` for storage, Spark
+and Kafka only. `stop` and `restart` accept the same groups; stops preserve data.
 
 Connect from any Python:
 

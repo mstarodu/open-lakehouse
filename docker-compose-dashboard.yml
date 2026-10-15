@@ -2,8 +2,8 @@
 # Read-only web dashboard for the open-lakehouse platform (Phase 3).
 #
 # A Next.js viewer over Unity Catalog, MLflow, SeaweedFS, and (optionally) Delta
-# Sharing. Binds to 127.0.0.1:3000 and is OPT-IN: it is deliberately NOT started
-# by `./lakehouse start all`. Start it with:
+# Sharing. Binds to 127.0.0.1:3000. Included in `start all`, excluded from
+# `start core`. Start it individually with:
 #     ./lakehouse start dashboard        # first run builds the Next.js image
 #
 # Build behind a proxy (public npm is unreachable on some networks — the build
