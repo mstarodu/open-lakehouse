@@ -38,8 +38,14 @@ containers, existing Spark/Unity Catalog configuration, the Jupyter runtime or
 An existing volume, container, sharing profile or private service configuration
 marks an installation as existing. If a required persistent credential cannot
 be recovered, setup stops and identifies the key to restore. Restore its original
-value from your private backup before retrying. Conflicting S3 configuration also
-stops setup rather than choosing a new password.
+value from your private backup before retrying. A configured value that disagrees
+with recovered existing state also stops setup before any private file is written,
+including when the container is stopped. The error identifies only the key, never
+either value. Missing/template values still use the existing recovery path.
+Conflicting S3 configuration also stops setup rather than choosing a new password.
+Container environment is evidence of its creation-time configuration, not proof of
+current database authentication after a manual password change. Resolve conflicts
+privately against the actual service and backups; setup does not reset passwords.
 
 Setup requires Docker inspection to succeed, including when the containers are
 stopped. Do not remove volumes or invent replacement database passwords to bypass
@@ -75,3 +81,47 @@ random loopback ports with empty temporary storage. It checks successful generat
 credentials, rejection of incorrect credentials and stability across a rerun.
 It removes only its own containers and network. This is a credential/bootstrap
 check, not a fresh installation of every lakehouse service.
+
+### Docker-free unit checks
+
+```bash
+python -m pytest tests/test_local_credentials.py --noconftest -q -p no:cacheprovider
+```
+
+This module supplies its own fake Docker CLI and fixtures. `--noconftest` avoids
+loading the unrelated shared Spark fixtures. It checks mismatched credentials for
+all supported keys, running/stopped container inspection, Fernet alias recovery,
+no writes (including permissions/mtime), redacted errors and unchanged matching
+credentials. It does not authenticate against live services.
+
+### macOS / OrbStack checks (real containers, not run by the unit checks)
+
+Start OrbStack and confirm `docker info` succeeds in the intended Docker context.
+The opt-in fresh-storage integration commands above also work with OrbStack; use
+native ARM first on Apple Silicon, then optionally `linux/amd64`. They validate
+real PostgreSQL/S3 authentication but do not reproduce the fixed-name container
+recovery path, because they deliberately use isolated container names.
+
+To check that path, use a disposable checkout and an otherwise empty Docker
+context/VM where `postgres`, `seaweedfs` and the other fixed service names are
+unused. Do not run this experiment against your existing installation:
+
+1. Run `./lakehouse setup --credentials-only`, then `./lakehouse start storage`.
+   Create a small database table and an S3 object as data-preservation sentinels.
+2. Privately back up the three generated configuration files. Change only
+   `POSTGRES_PASSWORD` in the disposable `.env` to a synthetic different value.
+   Record hashes, modes and mtimes of all three files without displaying contents.
+3. Run `./lakehouse setup --credentials-only`. Expect a nonzero exit and an error
+   naming `POSTGRES_PASSWORD`, with no values. Verify all three files are unchanged
+   from step 2 and the sentinels remain accessible with the original credentials.
+4. Stop only the disposable PostgreSQL container (do not remove it) and repeat the
+   conflict check. Expect the same rejection and unchanged files.
+5. Restore the backed-up `.env`, restart the disposable container, and repeat
+   credentials-only setup. Expect success and unchanged credentials/files.
+6. Repeat with `S3_SECRET_KEY` changed only in `.env`; expect rejection before
+   either Spark or Unity Catalog configuration is changed. Restore the backup.
+
+On an existing installation, limit verification to a privately backed-up,
+unchanged credentials-only rerun and normal service authentication. A reported
+conflict is a reason to investigate, not to recreate containers, remove volumes
+or rotate passwords automatically. No volume deletion is needed for these checks.

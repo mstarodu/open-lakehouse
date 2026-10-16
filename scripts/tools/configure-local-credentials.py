@@ -270,6 +270,11 @@ def configure(root):
             or ((not protected or created) and current == LEGACY.get(key))
         )
         if not invalid:
+            if recovered.get(key) and current != recovered[key]:
+                raise ValueError(
+                    f"Credential mismatch for {key} between local configuration and existing state; "
+                    "restore the original value before setup; credentials were not changed"
+                )
             values[key] = current
             continue
         value = recovered.get(key)

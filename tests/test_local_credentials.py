@@ -256,6 +256,65 @@ def test_config_mismatch_stops_before_any_write(installation):
     assert before == {p: p.read_bytes() for p in private_files(installation)}
 
 
+@pytest.mark.parametrize("key", sorted(credentials.PLACEHOLDERS))
+@pytest.mark.parametrize("stopped", [False, True])
+def test_container_mismatch_stops_before_any_write(
+    installation, monkeypatch, capsys, key, stopped
+):
+    credentials.configure(installation)
+    capsys.readouterr()
+    current = values(installation)[key]
+    recovered = secrets.token_hex(32)
+    docker_key = "AIRFLOW__CORE__FERNET_KEY" if key == "AIRFLOW_FERNET_KEY" else key
+    owned = containers(installation, {docker_key: recovered})
+    owned[0]["Name"] = "/" + {
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "postgres",
+        "S3_ACCESS_KEY": "seaweedfs",
+        "S3_SECRET_KEY": "seaweedfs",
+        "MLFLOW_PG_PASS": "mlflow-server",
+        "JUPYTER_TOKEN": "jupyter",
+        "DELTA_SHARING_TOKEN": "delta-sharing",
+    }.get(key, "airflow-webserver")
+    owned[0]["State"] = {"Running": not stopped}
+    monkeypatch.setenv("TEST_CONTAINERS", json.dumps(owned))
+    before = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode)
+        for p in private_files(installation)
+    }
+
+    def unexpected_write(*args):
+        pytest.fail("conflict reached private_write")
+
+    monkeypatch.setattr(credentials, "private_write", unexpected_write)
+    with pytest.raises(ValueError, match=f"Credential mismatch.*{key}") as error:
+        credentials.configure(installation)
+    assert before == {
+        p: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode)
+        for p in private_files(installation)
+    }
+    output = capsys.readouterr()
+    diagnostic = str(error.value) + output.out + output.err
+    assert current not in diagnostic
+    assert recovered not in diagnostic
+
+
+def test_matching_container_credentials_preserve_files(installation, monkeypatch):
+    credentials.configure(installation)
+    recovered = values(installation)
+    recovered["AIRFLOW__CORE__FERNET_KEY"] = recovered.pop("AIRFLOW_FERNET_KEY")
+    monkeypatch.setenv(
+        "TEST_CONTAINERS", json.dumps(containers(installation, recovered))
+    )
+    before = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns) for p in private_files(installation)
+    }
+    credentials.configure(installation)
+    assert before == {
+        p: (p.read_bytes(), p.stat().st_mtime_ns) for p in private_files(installation)
+    }
+
+
 def test_no_changes_without_available_docker_state(installation, monkeypatch):
     monkeypatch.setenv("TEST_DOCKER_DOWN", "1")
     with pytest.raises(ValueError, match="Start Docker"):
