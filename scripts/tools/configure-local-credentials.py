@@ -69,7 +69,11 @@ def read_env(text):
         except ValueError:
             raise ValueError(f"Cannot parse {key}; use a single-line value") from None
         value = " ".join(parts)
-        values[key] = os.environ.get(key, value) if "$" in raw else value
+        # Single-quoted values are literal in both shell and Compose syntax.
+        literal = re.fullmatch(r"\s*'[^']*'\s*(?:#.*)?", raw) is not None
+        values[key] = (
+            os.environ.get(key, value) if "$" in raw and not literal else value
+        )
     return values
 
 
@@ -122,6 +126,20 @@ def existing_state(root):
             "Start Docker before configuring credentials; existing storage must be checked"
         )
     recovered = {}
+
+    def recover(key, value):
+        # Never choose a secret based on container inspection order.
+        if key == "AIRFLOW__CORE__FERNET_KEY":
+            key = "AIRFLOW_FERNET_KEY"
+        if key not in PLACEHOLDERS or not value:
+            return
+        if key in recovered and recovered[key] != value:
+            raise ValueError(
+                f"Credential mismatch for {key} between existing sources; "
+                "restore consistent original values before setup; credentials were not changed"
+            )
+        recovered[key] = value
+
     owned = []
     names = docker_names("container", "ls", "--all")
     selected = sorted(set(CONTAINERS) & names)
@@ -135,12 +153,7 @@ def existing_state(root):
         owned.append(container)
         for entry in config.get("Env", []):
             key, _, value = entry.partition("=")
-            if value:
-                recovered.setdefault(key, value)
-    if "AIRFLOW__CORE__FERNET_KEY" in recovered:
-        recovered.setdefault(
-            "AIRFLOW_FERNET_KEY", recovered["AIRFLOW__CORE__FERNET_KEY"]
-        )
+            recover(key, value)
     # A random Jupyter token may exist only in its private runtime file.
     if not recovered.get("JUPYTER_TOKEN") and any(
         c.get("Name") == "/jupyter" for c in owned
@@ -170,13 +183,12 @@ def existing_state(root):
     )
     if profile.exists():
         try:
-            recovered.setdefault(
-                "DELTA_SHARING_TOKEN", json.loads(profile.read_text())["bearerToken"]
-            )
+            token = json.loads(profile.read_text())["bearerToken"]
         except (ValueError, KeyError):
             raise ValueError(
                 "Cannot read the existing sharing profile; restore it before setup"
             ) from None
+        recover("DELTA_SHARING_TOKEN", token)
     project = os.environ.get("COMPOSE_PROJECT_NAME") or re.sub(
         r"[^a-z0-9_-]", "", root.name.lower()
     )

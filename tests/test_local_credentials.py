@@ -315,6 +315,88 @@ def test_matching_container_credentials_preserve_files(installation, monkeypatch
     }
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("source", ["container", "fernet_alias", "sharing_profile"])
+def test_conflicting_recovery_sources_stop_before_any_write(
+    installation, monkeypatch, capsys, reverse, source
+):
+    credentials.configure(installation)
+    capsys.readouterr()
+    key = {
+        "container": "POSTGRES_PASSWORD",
+        "fernet_alias": "AIRFLOW_FERNET_KEY",
+        "sharing_profile": "DELTA_SHARING_TOKEN",
+    }[source]
+    original = values(installation)[key]
+    different = secrets.token_hex(32)
+    owned = containers(installation, {key: original})
+    if source == "sharing_profile":
+        (installation / "lakehouse.share").write_text(
+            json.dumps({"bearerToken": different})
+        )
+    else:
+        other_key = "AIRFLOW__CORE__FERNET_KEY" if source == "fernet_alias" else key
+        other = containers(installation, {other_key: different})[0]
+        other["Name"] = "/mlflow-server"
+        owned.append(other)
+    if reverse:
+        owned.reverse()
+    monkeypatch.setenv("TEST_CONTAINERS", json.dumps(owned))
+    before = {p: p.read_bytes() for p in private_files(installation)}
+
+    def unexpected_write(*args):
+        pytest.fail("conflicting recovery sources reached private_write")
+
+    monkeypatch.setattr(credentials, "private_write", unexpected_write)
+    with pytest.raises(ValueError, match=f"Credential mismatch.*{key}") as error:
+        credentials.configure(installation)
+    assert before == {p: p.read_bytes() for p in private_files(installation)}
+    output = capsys.readouterr()
+    assert original not in str(error.value) + output.out + output.err
+    assert different not in str(error.value) + output.out + output.err
+
+
+def test_matching_recovery_alias_and_profile_are_preserved(installation, monkeypatch):
+    credentials.configure(installation)
+    data = values(installation)
+    owned = containers(installation, data)
+    other = containers(
+        installation,
+        {"AIRFLOW__CORE__FERNET_KEY": data["AIRFLOW_FERNET_KEY"]},
+    )[0]
+    other["Name"] = "/mlflow-server"
+    owned.append(other)
+    monkeypatch.setenv("TEST_CONTAINERS", json.dumps(owned))
+    (installation / "lakehouse.share").write_text(
+        json.dumps({"bearerToken": data["DELTA_SHARING_TOKEN"]})
+    )
+    before = {p: p.read_bytes() for p in private_files(installation)}
+    credentials.configure(installation)
+    assert before == {p: p.read_bytes() for p in private_files(installation)}
+
+
+def test_single_quoted_secret_is_not_overridden_by_parent_environment(
+    installation, monkeypatch
+):
+    credentials.configure(installation)
+    path = installation / ".env"
+    literal = "private $literal with spaces"  # pragma: allowlist secret - test fixture
+    text = re.sub(
+        r"(?m)^POSTGRES_PASSWORD=.*$",
+        f"POSTGRES_PASSWORD='{literal}'",
+        path.read_text(),
+    )
+    path.write_text(text)
+    monkeypatch.setenv("POSTGRES_PASSWORD", secrets.token_hex(32))
+    monkeypatch.setenv(
+        "TEST_CONTAINERS",
+        json.dumps(containers(installation, {"POSTGRES_PASSWORD": literal})),
+    )
+    credentials.configure(installation)
+    assert path.read_text() == text
+    assert values(installation)["POSTGRES_PASSWORD"] == literal
+
+
 def test_no_changes_without_available_docker_state(installation, monkeypatch):
     monkeypatch.setenv("TEST_DOCKER_DOWN", "1")
     with pytest.raises(ValueError, match="Start Docker"):

@@ -42,6 +42,10 @@ value from your private backup before retrying. A configured value that disagree
 with recovered existing state also stops setup before any private file is written,
 including when the container is stopped. The error identifies only the key, never
 either value. Missing/template values still use the existing recovery path.
+Recovery also rejects disagreements between owned containers, between Airflow's
+Fernet environment aliases, or between a container and the sharing profile; it
+never chooses a value based on inspection order. Single-quoted `.env` values
+containing `$` remain literal even if the parent environment contains the same key.
 Conflicting S3 configuration also stops setup rather than choosing a new password.
 Container environment is evidence of its creation-time configuration, not proof of
 current database authentication after a manual password change. Resolve conflicts
