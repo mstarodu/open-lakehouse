@@ -33,17 +33,22 @@ Validate environment, install Python deps via Poetry, download JARs (~860 MB int
 
 ```bash
 ./lakehouse setup
+./lakehouse setup --credentials-only  # private credentials/configs only
 ```
 
 Runs the following steps and reports each:
 
 1. Check prerequisites (Docker, Poetry, psql, jq, nc, curl)
-2. Validate `.env` against `.env.example`
-3. Copy `config/spark/spark-defaults.conf.example` → `spark-defaults.conf` if missing
+2. Prepare private credentials and recover existing values without rotating them
+3. Align Spark and Unity Catalog S3 configuration; stop on conflicting values
 4. Download/verify JARs
 5. `poetry install --quiet`
 6. Create local `iceberg_catalog` database if `psql` is available
 7. Check disk space and port conflicts
+
+`--credentials-only` requires Python and a reachable Docker daemon, then prepares
+the private configuration without downloading dependencies or starting services.
+See [credential recovery](local-credentials.md) before changing existing secrets.
 
 ### `start [service]`
 
@@ -66,6 +71,11 @@ including `start sharing` as an alias for `share start`. A failed build, startup
 readiness check stops the group and returns a failure; earlier services remain
 running so the failure can be inspected and the command retried. Dashboard code
 execution stays disabled unless explicitly configured.
+
+Unity Catalog and MLflow HTTP readiness checks reject error responses. Delta
+Sharing readiness checks its authenticated shares API before publishing the
+client profile. Profile writes are atomic and owner-only; a failed write keeps
+the previous profile and fails startup.
 
 ### `stop [service]`
 
