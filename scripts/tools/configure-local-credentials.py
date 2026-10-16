@@ -9,7 +9,7 @@ import re
 import secrets
 import shlex
 import shutil
-import subprocess  # nosec B404 - Docker state is read using fixed argument arrays.
+import subprocess  # nosec B404 # Docker state is read using fixed argument arrays.
 import sys
 import tempfile
 from pathlib import Path
@@ -36,8 +36,8 @@ PLACEHOLDERS = {
 }
 LEGACY = {
     "S3_ACCESS_KEY": "lakehouse_s3",
-    "S3_SECRET_KEY": "lakehouse_s3_secret",  # pragma: allowlist secret - public legacy default
-    "MLFLOW_PG_PASS": "mlflow_password",  # pragma: allowlist secret - public legacy default
+    "S3_SECRET_KEY": "lakehouse_s3_secret",  # nosec B105 # pragma: allowlist secret - public legacy default
+    "MLFLOW_PG_PASS": "mlflow_password",  # nosec B105 # pragma: allowlist secret - public legacy default
 }
 PERSISTENT = {
     "POSTGRES_USER",

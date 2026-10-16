@@ -269,9 +269,9 @@ def test_container_mismatch_stops_before_any_write(
     owned = containers(installation, {docker_key: recovered})
     owned[0]["Name"] = "/" + {
         "POSTGRES_USER": "postgres",
-        "POSTGRES_PASSWORD": "postgres",
+        "POSTGRES_PASSWORD": "postgres",  # pragma: allowlist secret - container name, not a credential
         "S3_ACCESS_KEY": "seaweedfs",
-        "S3_SECRET_KEY": "seaweedfs",
+        "S3_SECRET_KEY": "seaweedfs",  # pragma: allowlist secret - container name, not a credential
         "MLFLOW_PG_PASS": "mlflow-server",
         "JUPYTER_TOKEN": "jupyter",
         "DELTA_SHARING_TOKEN": "delta-sharing",
